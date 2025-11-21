@@ -45,15 +45,11 @@ jobs:
       - name: 🔍 获取最新稳定版分支
         id: get_branch
         run: |
-          # 获取 ImmortalWrt 最新的稳定版分支
-          LATEST_STABLE=$(curl -s https://api.github.com/repos/immortalwrt/immortalwrt/branches | grep -o '"name":"openwrt-[0-9]*\.[0-9]*"' | head -1 | cut -d'"' -f4)
-          if [ -z "$LATEST_STABLE" ]; then
-            LATEST_STABLE="openwrt-24.10"
-          fi
+          LATEST_STABLE="openwrt-24.10"
           echo "branch=$LATEST_STABLE" >> $GITHUB_OUTPUT
           VERSION=$(echo $LATEST_STABLE | sed 's/openwrt-//')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "✅ 检测到最新稳定版: $LATEST_STABLE (版本 $VERSION)"
+          echo "✅ 使用稳定版: $LATEST_STABLE (版本 $VERSION)"
 
   build:
     runs-on: ubuntu-22.04
@@ -78,8 +74,6 @@ jobs:
           free -h
           echo "磁盘空间:"
           df -h
-          echo "系统版本:"
-          lsb_release -a
 
       - name: ✅ Checkout 用户配置仓库
         uses: actions/checkout@v4
@@ -187,38 +181,40 @@ jobs:
             case "${{ github.event.inputs.target_device }}" in
               "mediatek/filogic")
                 echo "配置为 MediaTek Filogic 设备"
-                cat > .config << EOF
+                cat > .config << 'EOF'
 CONFIG_TARGET_mediatek=y
 CONFIG_TARGET_mediatek_filogic=y
 CONFIG_TARGET_mediatek_filogic_DEVICE_glinet_gl-mt6000=y
-$(if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then echo "CONFIG_PACKAGE_luci=y"; fi)
 EOF
                 ;;
               "qualcomm/ipq60xx")
                 echo "配置为 Qualcomm IPQ60xx 设备"
-                cat > .config << EOF
+                cat > .config << 'EOF'
 CONFIG_TARGET_qualcommax=y
 CONFIG_TARGET_qualcommax_ipq60xx=y
-$(if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then echo "CONFIG_PACKAGE_luci=y"; fi)
 EOF
                 ;;
               "rockchip/armv8")
                 echo "配置为 Rockchip ARMv8 设备"
-                cat > .config << EOF
+                cat > .config << 'EOF'
 CONFIG_TARGET_rockchip=y
 CONFIG_TARGET_rockchip_armv8=y
-$(if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then echo "CONFIG_PACKAGE_luci=y"; fi)
 EOF
                 ;;
               "x86/64")
                 echo "配置为 x86/64 设备"
-                cat > .config << EOF
+                cat > .config << 'EOF'
 CONFIG_TARGET_x86=y
 CONFIG_TARGET_x86_64=y
-$(if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then echo "CONFIG_PACKAGE_luci=y"; fi)
 EOF
                 ;;
             esac
+            
+            # 添加 Luci 配置
+            if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then
+              echo "CONFIG_PACKAGE_luci=y" >> .config
+            fi
+            
             make defconfig
           fi
 
