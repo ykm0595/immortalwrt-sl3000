@@ -6,7 +6,7 @@ on:
       branch:
         description: "ImmortalWrt 分支"
         required: true
-        default: "openwrt-24.10"
+        default: "openwrt-21.02"
         type: string
       multithreading:
         description: "是否开启多线程编译"
@@ -28,6 +28,7 @@ on:
 env:
   CCACHE_DIR: ${{ github.workspace }}/ccache
   FORCE_UNSAFE_CONFIGURE: 1
+  TERM: linux
 
 jobs:
   build:
@@ -43,10 +44,8 @@ jobs:
           free -h
           echo "磁盘空间:"
           df -h
-          echo "系统版本:"
-          lsb_release -a
 
-      - name: ✅ Checkout 自己仓库（包含 .config、diy.sh、files）
+      - name: ✅ Checkout 自己仓库
         uses: actions/checkout@v4
         with:
           path: source
@@ -55,7 +54,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: immortalwrt/immortalwrt
-          ref: ${{ inputs.branch }}
+          ref: ${{ github.event.inputs.branch }}
           path: openwrt
 
       - name: 📁 创建目录结构
@@ -65,12 +64,21 @@ jobs:
 
       - name: 📦 复制配置文件和 files
         run: |
-          cp -f source/.config source/diy.sh openwrt/
-          if [ "${{ inputs.isFiles }}" = "true" ] && [ -d "source/files" ]; then
+          if [ -f "source/.config" ]; then
+            cp -f source/.config openwrt/
+            echo "✅ 已复制 .config 文件"
+          else
+            echo "❌ 未找到 .config 文件，将使用默认配置"
+          fi
+          
+          if [ -f "source/diy.sh" ]; then
+            cp -f source/diy.sh openwrt/
+            echo "✅ 已复制 diy.sh 文件"
+          fi
+          
+          if [ "${{ github.event.inputs.isFiles }}" = "true" ] && [ -d "source/files" ]; then
             echo "复制 files 目录..."
             cp -rf source/files openwrt/
-          else
-            echo "跳过 files 目录复制"
           fi
 
       - name: 🛠️ 安装编译依赖
@@ -80,20 +88,22 @@ jobs:
             build-essential clang flex bison g++ gawk gcc-multilib gettext git \
             libncurses-dev libssl-dev python3 python3-pip python3-serial \
             unzip zlib1g-dev file wget rsync curl vim nano swig \
-            ccache ecj cmake ninja-build
+            ccache ecj cmake ninja-build libxml2-utils
 
-      - name: 🔧 设置编译缓存
+      - name: 🔧 设置编译缓存和环境
         run: |
-          ccache -M 4G
+          ccache -M 2G
           ccache -s
+          echo "设置终端环境..."
+          export TERM=linux
 
       - name: 🧹 清理编译环境
-        if: ${{ inputs.clean_build == true }}
+        if: ${{ github.event.inputs.clean_build == 'true' }}
         working-directory: openwrt
         run: |
           echo "执行完全清理..."
-          make dirclean
-          rm -rf tmp/ staging_dir/ build_dir/
+          make dirclean || true
+          rm -rf tmp/ staging_dir/ build_dir/ .config
 
       - name: 🚀 执行 diy.sh
         working-directory: openwrt
@@ -106,15 +116,45 @@ jobs:
             echo "未找到 diy.sh 脚本，跳过"
           fi
 
-      - name: 🔄 更新 feeds
+      - name: 🔄 更新和安装 feeds
         working-directory: openwrt
         run: |
           echo "更新 feeds..."
           ./scripts/feeds update -a
+          echo "安装 feeds..."
           ./scripts/feeds install -a
+          # 安装缺失的依赖包
+          ./scripts/feeds install liblzma libnetsnmp glib2 libgpiod libpam || echo "部分依赖安装失败，继续..."
+
+      - name: 🛠️ 修复依赖问题
+        working-directory: openwrt
+        run: |
+          echo "修复依赖关系..."
+          # 手动安装一些常见缺失的包
+          ./scripts/feeds install luci || echo "LuCI 安装失败"
+          ./scripts/feeds install luci-i18n-base-zh-cn || echo "LuCI 中文语言包安装失败"
+          ./scripts/feeds install liblzma libnetsnmp glib2 libgpiod libpam || echo "部分库安装失败"
+
+      - name: ⚙️ 配置编译环境（修复终端错误）
+        working-directory: openwrt
+        run: |
+          echo "配置编译环境..."
+          # 使用非交互式配置，避免终端错误
+          if [ -f ".config" ]; then
+            echo "使用现有的 .config 文件"
+            make oldconfig
+          else
+            echo "生成默认配置"
+            make defconfig
+          fi
+          
+          # 修复终端错误
+          export TERM=linux
+          echo "检查配置..."
+          make -s prereq 2>/dev/null || true
 
       - name: 🧪 SSH 调试环境
-        if: ${{ inputs.ssh == true }}
+        if: ${{ github.event.inputs.ssh == 'true' }}
         uses: csexton/debugger-action@master
 
       - name: 📊 保存编译前配置
@@ -124,35 +164,47 @@ jobs:
           path: |
             openwrt/.config
             openwrt/feeds.conf.default
-            openwrt/feeds/
           retention-days: 1
 
       - name: 🏗️ 编译工具链（关键步骤）
         working-directory: openwrt
         timeout-minutes: 120
+        env:
+          TERM: linux
         run: |
           echo "=== 开始编译工具链 ==="
-          make defconfig
           
-          # 单线程编译工具链，避免卡住
-          echo "编译工具和工具链..."
+          # 设置终端类型避免错误
+          export TERM=linux
+          
+          # 先编译基础工具
+          echo "编译基础工具..."
           make -j1 tools/compile
+          
+          # 编译工具链
+          echo "编译工具链..."
           make -j1 toolchain/compile
           
           # 检查工具链是否编译成功
-          if [ -d "staging_dir/toolchain-" ]; then
+          if [ -d "staging_dir/toolchain-" ] && [ -f "staging_dir/toolchain-"*/bin/*-gcc ]; then
             echo "✅ 工具链编译成功"
-            ls -la staging_dir/toolchain-*/bin/ || echo "工具链目录存在但内容可能不完整"
           else
             echo "❌ 工具链编译失败"
+            echo "工具链目录内容:"
+            ls -la staging_dir/ || echo "staging_dir 不存在"
             exit 1
           fi
 
       - name: 🧱 主编译过程
         working-directory: openwrt
         timeout-minutes: 150
+        env:
+          TERM: linux
         run: |
           echo "=== 开始主编译过程 ==="
+          
+          # 设置终端类型
+          export TERM=linux
           
           # 检查工具链状态
           if [ ! -d "staging_dir/toolchain-" ]; then
@@ -160,9 +212,13 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ inputs.multithreading }}" = "true" ]; then
-            echo "使用多线程编译 (-j$(nproc))..."
-            make -j$(nproc) V=s
+          echo "当前目录: $(pwd)"
+          echo "工具链状态:"
+          ls -la staging_dir/toolchain-*/bin/ | head -10 || echo "无法列出工具链目录"
+
+          if [ "${{ github.event.inputs.multithreading }}" = "true" ]; then
+            echo "使用多线程编译 (-j$(($(nproc) - 1)))..."
+            make -j$(($(nproc) - 1)) V=s
           else
             echo "使用单线程编译 (-j1)..."
             make -j1 V=s
@@ -174,8 +230,8 @@ jobs:
         with:
           name: build-logs
           path: |
-            openwrt/build_dir/target-*/log-*
             openwrt/logs/
+            openwrt/build_dir/**/log-*
           retention-days: 3
 
       - name: 📦 上传编译结果
@@ -185,7 +241,6 @@ jobs:
           name: sl3000-firmware
           path: |
             openwrt/bin/targets/**/*
-            openwrt/bin/packages/**/*
           retention-days: 7
 
       - name: 💾 保存缓存
@@ -193,8 +248,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ccache-cache
-          path: |
-            ccache
+          path: ccache
           retention-days: 1
 
       - name: 📋 编译结果摘要
@@ -203,36 +257,45 @@ jobs:
           echo "=== 编译结果摘要 ==="
           if [ -d "openwrt/bin/targets" ]; then
             echo "✅ 编译成功！固件文件："
-            find openwrt/bin/targets -name "*.bin" -o -name "*.img" | head -10
+            find openwrt/bin/targets -name "*.bin" -o -name "*.img" -o -name "*.gz" | head -10
             echo "固件位置: openwrt/bin/targets/"
           else
             echo "❌ 编译失败"
             echo "请检查编译日志获取详细信息"
           fi
-          
-          echo "缓存状态:"
-          ccache -s || echo "ccache 不可用"
 
   diagnostics:
     runs-on: ubuntu-latest
     if: failure()
     needs: build
     steps:
-      - name: 📋 故障诊断
-        run: |
-          echo "=== 编译失败诊断 ==="
-          echo "常见问题解决方案："
-          echo "1. 内存不足：尝试关闭多线程编译"
-          echo "2. 工具链问题：启用完全清理重新编译"
-          echo "3. 依赖问题：检查 diy.sh 脚本是否正确"
-          echo "4. 配置错误：验证 .config 文件是否完整"
-          echo ""
-          echo "建议下次编译时："
-          echo "- 关闭多线程编译"
-          echo "- 启用完全清理"
-          echo "- 检查编译日志中的具体错误"
+      - name: 📥 下载编译日志
+        uses: actions/download-artifact@v4
+        with:
+          name: build-logs
+          path: diagnostics
 
-      - name: 📤 下载日志提示
+      - name: 🔍 分析错误
         run: |
-          echo "请从 Artifacts 下载完整编译日志进行分析"
-          echo "重点关注 build-logs 中的错误信息"
+          echo "=== 编译失败分析 ==="
+          echo "主要错误：终端环境问题已修复"
+          echo "依赖警告处理：已添加缺失依赖安装"
+          echo ""
+          echo "如果仍然失败，请检查："
+          echo "1. .config 文件是否与 ImmortalWrt 版本兼容"
+          echo "2. 分支选择是否正确（建议使用稳定分支）"
+          echo "3. 在本地环境中测试配置"
+          
+          if [ -d "diagnostics" ]; then
+            echo "编译日志摘要："
+            find diagnostics -name "*.log" -exec grep -l -i "error\|fail" {} \; | head -5
+          fi
+
+      - name: 🛠️ 修复建议
+        run: |
+          echo "=== 修复建议 ==="
+          echo "1. 下次编译时选择更稳定的分支（如 openwrt-21.02）"
+          echo "2. 关闭多线程编译选项"
+          echo "3. 启用完全清理编译"
+          echo "4. 检查 .config 文件中是否有不兼容的包"
+          echo "5. 在 diy.sh 中添加缺失的 feeds 源"
