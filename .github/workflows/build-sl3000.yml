@@ -1,102 +1,25 @@
-name: 🚀 编译 SL-3000 ImmortalWrt 固件
+name: 🧪 测试文件复制
 
 on:
   workflow_dispatch:
-    inputs:
-      branch:
-        description: "ImmortalWrt 分支"
-        type: string
-        required: true
-        default: "openwrt-24.10"
-      multithreading:
-        description: "是否开启多线程编译"
-        type: boolean
-        default: true
-      ssh:
-        description: "是否开启 SSH 调试环境"
-        type: boolean
-        default: false
-      isFiles:
-        description: "是否启用 files 大法"
-        type: boolean
-        default: true
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-    name: 🚀 编译 SL-3000 固件
     steps:
       - name: Checkout 自己仓库
         uses: actions/checkout@v4
 
-      - name: Checkout ImmortalWrt 源码
-        uses: actions/checkout@v4
-        with:
-          repository: immortalwrt/immortalwrt
-          ref: ${{ inputs.branch }}
-          path: openwrt
+      - name: 创建 openwrt 目录
+        run: mkdir -p openwrt
 
-      - name: 查看磁盘空间
-        run: df -hT
-
-      - name: 优化磁盘空间
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 3072
-          swap-size-mb: 1
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-codeql: "true"
-          remove-docker-images: "true"
-
-      - name: 安装编译依赖
-        run: |
-          sudo apt update
-          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip-full patch pkgconf python3 python3-pip qemu-utils rsync squashfs-tools subversion swig texinfo unzip vim wget xmlto xxd zlib1g-dev zstd
+      - name: 列出根目录文件
+        run: ls -al
 
       - name: 复制配置文件
         run: |
           cp -f .config diy.sh openwrt/
-          if [ "${{ inputs.isFiles }}" = "true" ]; then
-            cp -r files openwrt/files
-          fi
+          cp -r files openwrt/files
 
-      - name: 运行 diy.sh
-        working-directory: openwrt
-        run: |
-          chmod +x diy.sh
-          ./diy.sh
-
-      - name: 更新 feeds
-        working-directory: openwrt
-        run: ./scripts/feeds update -a && ./scripts/feeds install -a
-
-      - name: SSH 调试环境
-        if: ${{ inputs.ssh == true }}
-        uses: csexton/debugger-action@master
-
-      - name: 保存编译前配置
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-before-build
-          path: |
-            openwrt/.config
-            openwrt/feeds.conf.default
-          include-hidden-files: true
-
-      - name: 编译 SL-3000 固件 (多线程)
-        if: ${{ inputs.multithreading == true }}
-        working-directory: openwrt
-        run: make -j$(nproc) V=s
-
-      - name: 编译 SL-3000 固件 (单线程)
-        if: ${{ inputs.multithreading == false }}
-        working-directory: openwrt
-        run: make -j1 V=s
-
-      - name: 上传编译结果
-        uses: actions/upload-artifact@v4
-        with:
-          name: sl3000-build-result
-          path: openwrt/bin/targets
+      - name: 列出 openwrt 目录文件
+        run: ls -al openwrt
