@@ -1,4 +1,4 @@
-name: 🚀 终极 ImmortalWRT 编译 (Ultimate ImmortalWRT Build)
+name: 🚀 编译 ImmortalWRT
 
 on:
   workflow_dispatch:
@@ -127,7 +127,7 @@ jobs:
       - name: 📥 克隆 ImmortalWRT
         uses: actions/checkout@v4
         with:
-          repository: "${{ inputs.owner }}/${{ inputs.repo }}"
+          repository: ${{ inputs.owner }}/${{ inputs.repo }}
           ref: ${{ inputs.branch }}
           path: openWRT
 
@@ -167,11 +167,11 @@ jobs:
       - name: ⏰ 编译超时保护
         timeout-minutes: 360
 
-      - name: 🛠️ 编译 ImmortalWRT (带重试)
+      - name: 🛠️ 编译 ImmortalWRT
         working-directory: openWRT
         run: |
           set +e
-          for attempt in {1..3}; do
+          for attempt in 1 2 3; do
             echo "编译尝试 $attempt/3"
             if [ "${{ inputs.multithreading }}" = "true" ]; then
               make -j$(nproc) V=s
