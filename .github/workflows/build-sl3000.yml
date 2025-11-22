@@ -25,10 +25,6 @@ on:
         description: "是否包含 Luci Web 界面"
         default: true
         type: boolean
-      ssh_debug:
-        description: "是否开启 SSH 调试"
-        default: false
-        type: boolean
 
 env:
   CCACHE_DIR: ${{ github.workspace }}/ccache
@@ -70,7 +66,9 @@ jobs:
         run: |
           echo "=== 系统资源信息 ==="
           echo "CPU 核心数: $(nproc)"
+          echo "内存:"
           free -h
+          echo "磁盘:"
           df -h
 
       - name: ✅ Checkout 用户配置仓库
@@ -90,7 +88,7 @@ jobs:
           mkdir -p immortalwrt
           mkdir -p ccache
 
-      - name: 🛠️ 安装完整编译依赖
+      - name: 🛠️ 安装编译依赖
         run: |
           sudo apt update
           sudo apt install -y \
@@ -99,7 +97,7 @@ jobs:
             unzip zlib1g-dev file wget rsync curl \
             ccache ecj cmake ninja-build libxml2-utils
 
-      - name: 🔧 配置编译环境和缓存
+      - name: 🔧 配置编译环境
         run: |
           ccache -M 2G
           ccache -s
@@ -110,6 +108,8 @@ jobs:
           if [ -f "user-configs/.config" ]; then
             cp -f user-configs/.config immortalwrt/
             echo "✅ 已复制 .config 文件"
+          else
+            echo "⚠️ 未找到用户 .config，将使用默认配置"
           fi
           
           if [ -f "user-configs/diy.sh" ]; then
@@ -157,55 +157,49 @@ jobs:
         working-directory: immortalwrt
         run: |
           echo "生成基础配置..."
+          
+          # 如果已有配置，使用现有配置
           if [ -f ".config" ]; then
             echo "使用现有 .config 文件"
             make defconfig
-          else
-            echo "创建默认配置"
-            # 根据设备类型设置基础配置
-            case "${{ github.event.inputs.target_device }}" in
-              "mediatek/filogic")
-                echo "配置为 MediaTek Filogic 设备"
-                {
-                  echo "CONFIG_TARGET_mediatek=y"
-                  echo "CONFIG_TARGET_mediatek_filogic=y" 
-                  echo "CONFIG_TARGET_mediatek_filogic_DEVICE_glinet_gl-mt6000=y"
-                } > .config
-                ;;
-              "qualcomm/ipq60xx")
-                echo "配置为 Qualcomm IPQ60xx 设备"
-                {
-                  echo "CONFIG_TARGET_qualcommax=y"
-                  echo "CONFIG_TARGET_qualcommax_ipq60xx=y"
-                } > .config
-                ;;
-              "rockchip/armv8")
-                echo "配置为 Rockchip ARMv8 设备"
-                {
-                  echo "CONFIG_TARGET_rockchip=y"
-                  echo "CONFIG_TARGET_rockchip_armv8=y"
-                } > .config
-                ;;
-              "x86/64")
-                echo "配置为 x86/64 设备"
-                {
-                  echo "CONFIG_TARGET_x86=y"
-                  echo "CONFIG_TARGET_x86_64=y"
-                } > .config
-                ;;
-            esac
-            
-            # 添加 Luci 配置
-            if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then
-              echo "CONFIG_PACKAGE_luci=y" >> .config
-            fi
-            
-            make defconfig
+            exit 0
           fi
-
-      - name: 🧪 SSH 调试环境
-        if: ${{ github.event.inputs.ssh_debug == 'true' }}
-        uses: csexton/debugger-action@master
+          
+          echo "创建默认配置..."
+          
+          # 根据设备类型生成配置
+          DEVICE="${{ github.event.inputs.target_device }}"
+          
+          if [ "$DEVICE" = "mediatek/filogic" ]; then
+            echo "配置为 MediaTek Filogic 设备"
+            echo "CONFIG_TARGET_mediatek=y" > .config
+            echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+            echo "CONFIG_TARGET_mediatek_filogic_DEVICE_glinet_gl-mt6000=y" >> .config
+          elif [ "$DEVICE" = "qualcomm/ipq60xx" ]; then
+            echo "配置为 Qualcomm IPQ60xx 设备"
+            echo "CONFIG_TARGET_qualcommax=y" > .config
+            echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
+          elif [ "$DEVICE" = "rockchip/armv8" ]; then
+            echo "配置为 Rockchip ARMv8 设备"
+            echo "CONFIG_TARGET_rockchip=y" > .config
+            echo "CONFIG_TARGET_rockchip_armv8=y" >> .config
+          elif [ "$DEVICE" = "x86/64" ]; then
+            echo "配置为 x86/64 设备"
+            echo "CONFIG_TARGET_x86=y" > .config
+            echo "CONFIG_TARGET_x86_64=y" >> .config
+          else
+            echo "❌ 未知设备类型: $DEVICE"
+            exit 1
+          fi
+          
+          # 添加 Luci 配置
+          if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then
+            echo "CONFIG_PACKAGE_luci=y" >> .config
+            echo "CONFIG_PACKAGE_luci-base=y" >> .config
+          fi
+          
+          echo "应用配置..."
+          make defconfig
 
       - name: 📥 预下载源码包
         working-directory: immortalwrt
@@ -215,7 +209,8 @@ jobs:
           make download -j$(nproc) || make download -j1
           
           echo "检查下载完整性..."
-          find dl -size -1024c -exec rm -f {} \; 2>/dev/null || true
+          # 删除可能不完整的文件并重新下载
+          find dl -size -1k -name "*.gz" -o -name "*.bz2" -o -name "*.xz" | xargs rm -f 2>/dev/null || true
           make download -j$(nproc)
 
       - name: 🏗️ 编译工具链
@@ -231,8 +226,10 @@ jobs:
           echo "编译工具链..."
           make -j1 toolchain/compile
           
-          if [ -d "staging_dir/toolchain-" ]; then
+          # 验证工具链
+          if [ -d "staging_dir/toolchain-" ] && [ -f "staging_dir/toolchain-"*/bin/*-gcc ]; then
             echo "✅ 工具链编译成功"
+            echo "工具链位置: staging_dir/toolchain-*/bin/"
           else
             echo "❌ 工具链编译失败"
             exit 1
@@ -286,6 +283,14 @@ jobs:
             immortalwrt/bin/targets/**/*
           retention-days: 30
 
+      - name: 💾 保存编译缓存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccache-cache
+          path: ccache
+          retention-days: 2
+
       - name: 🎉 编译完成摘要
         if: always()
         run: |
@@ -296,7 +301,32 @@ jobs:
           
           if [ -d "immortalwrt/bin/targets" ]; then
             echo "✅ 编译成功！"
-            find immortalwrt/bin/targets -name "*.bin" -o -name "*.img" | head -5
+            echo "生成的固件文件:"
+            find immortalwrt/bin/targets -name "*.bin" -o -name "*.img" -o -name "*.gz" | head -10
+            echo ""
+            echo "固件位置: immortalwrt/bin/targets/"
           else
             echo "❌ 编译失败"
+            echo "请查看 build-logs 日志文件分析问题"
           fi
+
+  diagnostics:
+    runs-on: ubuntu-22.04
+    if: failure()
+    needs: [setup, build]
+    steps:
+      - name: 📋 编译失败分析
+        run: |
+          echo "=== 编译失败分析 ==="
+          echo "ImmortalWrt 版本: ${{ needs.setup.outputs.immortalwrt_branch }}"
+          echo ""
+          echo "常见问题排查:"
+          echo "1. 依赖缺失: 检查 feeds 是否完整安装"
+          echo "2. 工具链问题: 确认工具链编译是否成功" 
+          echo "3. 内存不足: 尝试关闭多线程编译"
+          echo "4. 网络超时: 检查下载的源码包是否完整"
+          echo ""
+          echo "修复建议:"
+          echo "- 启用完全清理编译 (clean_build: true)"
+          echo "- 关闭多线程编译 (multithreading: false)"
+          echo "- 检查 .config 文件配置是否正确"
