@@ -70,9 +70,7 @@ jobs:
         run: |
           echo "=== 系统资源信息 ==="
           echo "CPU 核心数: $(nproc)"
-          echo "内存信息:"
           free -h
-          echo "磁盘空间:"
           df -h
 
       - name: ✅ Checkout 用户配置仓库
@@ -91,28 +89,20 @@ jobs:
         run: |
           mkdir -p immortalwrt
           mkdir -p ccache
-          mkdir -p dl-cache
 
       - name: 🛠️ 安装完整编译依赖
         run: |
           sudo apt update
-          sudo apt full-upgrade -y
           sudo apt install -y \
-            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk \
-            gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man \
-            intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev \
-            libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev \
-            libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
-            ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply \
-            python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools \
-            subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+            build-essential clang flex bison g++ gawk gcc-multilib gettext git \
+            libncurses-dev libssl-dev python3 python3-pip python3-serial \
+            unzip zlib1g-dev file wget rsync curl \
+            ccache ecj cmake ninja-build libxml2-utils
 
       - name: 🔧 配置编译环境和缓存
         run: |
-          ccache -M 4G
+          ccache -M 2G
           ccache -s
-          echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
 
       - name: 📦 复制用户配置文件
         run: |
@@ -120,8 +110,6 @@ jobs:
           if [ -f "user-configs/.config" ]; then
             cp -f user-configs/.config immortalwrt/
             echo "✅ 已复制 .config 文件"
-          else
-            echo "ℹ️ 未找到用户 .config，将使用默认配置"
           fi
           
           if [ -f "user-configs/diy.sh" ]; then
@@ -140,7 +128,7 @@ jobs:
         working-directory: immortalwrt
         run: |
           echo "执行完全清理..."
-          make distclean || make dirclean || true
+          make dirclean || true
           rm -rf tmp/ staging_dir/ build_dir/ bin/
 
       - name: 🚀 执行自定义脚本
@@ -148,7 +136,6 @@ jobs:
         run: |
           if [ -f "diy.sh" ]; then
             echo "执行用户 diy.sh 脚本..."
-            chmod +x diy.sh
             ./diy.sh
           fi
 
@@ -160,12 +147,10 @@ jobs:
           echo "安装 feeds..."
           ./scripts/feeds install -a
           
-          # 确保安装基本组件
           if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then
             echo "安装 Luci 相关组件..."
             ./scripts/feeds install luci
             ./scripts/feeds install luci-base
-            ./scripts/feeds install luci-compat
           fi
 
       - name: ⚙️ 生成基础配置
@@ -181,32 +166,32 @@ jobs:
             case "${{ github.event.inputs.target_device }}" in
               "mediatek/filogic")
                 echo "配置为 MediaTek Filogic 设备"
-                cat > .config << 'EOF'
-CONFIG_TARGET_mediatek=y
-CONFIG_TARGET_mediatek_filogic=y
-CONFIG_TARGET_mediatek_filogic_DEVICE_glinet_gl-mt6000=y
-EOF
+                {
+                  echo "CONFIG_TARGET_mediatek=y"
+                  echo "CONFIG_TARGET_mediatek_filogic=y" 
+                  echo "CONFIG_TARGET_mediatek_filogic_DEVICE_glinet_gl-mt6000=y"
+                } > .config
                 ;;
               "qualcomm/ipq60xx")
                 echo "配置为 Qualcomm IPQ60xx 设备"
-                cat > .config << 'EOF'
-CONFIG_TARGET_qualcommax=y
-CONFIG_TARGET_qualcommax_ipq60xx=y
-EOF
+                {
+                  echo "CONFIG_TARGET_qualcommax=y"
+                  echo "CONFIG_TARGET_qualcommax_ipq60xx=y"
+                } > .config
                 ;;
               "rockchip/armv8")
                 echo "配置为 Rockchip ARMv8 设备"
-                cat > .config << 'EOF'
-CONFIG_TARGET_rockchip=y
-CONFIG_TARGET_rockchip_armv8=y
-EOF
+                {
+                  echo "CONFIG_TARGET_rockchip=y"
+                  echo "CONFIG_TARGET_rockchip_armv8=y"
+                } > .config
                 ;;
               "x86/64")
                 echo "配置为 x86/64 设备"
-                cat > .config << 'EOF'
-CONFIG_TARGET_x86=y
-CONFIG_TARGET_x86_64=y
-EOF
+                {
+                  echo "CONFIG_TARGET_x86=y"
+                  echo "CONFIG_TARGET_x86_64=y"
+                } > .config
                 ;;
             esac
             
@@ -229,14 +214,8 @@ EOF
           echo "预下载源码包..."
           make download -j$(nproc) || make download -j1
           
-          # 检查并重新下载不完整的文件
           echo "检查下载完整性..."
-          find dl -size -1024c -name "*.gz" -o -name "*.bz2" -o -name "*.xz" | while read file; do
-            if [ -f "$file" ]; then
-              echo "重新下载不完整文件: $file"
-              rm -f "$file"
-            fi
-          done
+          find dl -size -1024c -exec rm -f {} \; 2>/dev/null || true
           make download -j$(nproc)
 
       - name: 🏗️ 编译工具链
@@ -246,18 +225,14 @@ EOF
           echo "=== 编译工具链 ==="
           echo "开始时间: $(date)"
           
-          # 单线程编译工具链确保稳定性
           echo "编译基础工具..."
           make -j1 tools/compile
           
           echo "编译工具链..."
           make -j1 toolchain/compile
           
-          # 验证工具链
-          if [ -d "staging_dir/toolchain-" ] && find staging_dir/toolchain-*/bin -name "*gcc" | grep -q .; then
+          if [ -d "staging_dir/toolchain-" ]; then
             echo "✅ 工具链编译成功"
-            echo "工具链文件:"
-            ls -la staging_dir/toolchain-*/bin/*gcc | head -5
           else
             echo "❌ 工具链编译失败"
             exit 1
@@ -272,7 +247,6 @@ EOF
           echo "=== 开始主编译 ==="
           echo "开始时间: $(date)"
           
-          # 设置编译线程数
           if [ "${{ github.event.inputs.multithreading }}" = "true" ]; then
             JOBS=$(($(nproc) - 1))
             echo "使用多线程编译 (-j$JOBS)..."
@@ -301,25 +275,16 @@ EOF
           name: build-logs-${{ needs.setup.outputs.branch_version }}
           path: |
             immortalwrt/logs/
-            immortalwrt/build_dir/**/log-*
           retention-days: 3
 
       - name: 📦 上传固件文件
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ needs.setup.outputs.branch_version }}-${{ github.event.inputs.target_device }}
+          name: firmware-${{ needs.setup.outputs.branch_version }}
           path: |
             immortalwrt/bin/targets/**/*
           retention-days: 30
-
-      - name: 💾 保存编译缓存
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-cache-${{ needs.setup.outputs.branch_version }}
-          path: ccache
-          retention-days: 2
 
       - name: 🎉 编译完成摘要
         if: always()
@@ -331,63 +296,7 @@ EOF
           
           if [ -d "immortalwrt/bin/targets" ]; then
             echo "✅ 编译成功！"
-            echo "生成的固件文件:"
-            find immortalwrt/bin/targets -name "*.bin" -o -name "*.img" -o -name "*.gz" | head -10
-            echo ""
-            echo "固件位置: immortalwrt/bin/targets/"
+            find immortalwrt/bin/targets -name "*.bin" -o -name "*.img" | head -5
           else
             echo "❌ 编译失败"
-            echo "请查看 build-logs 日志文件分析问题"
           fi
-          
-          echo "缓存状态:"
-          ccache -s 2>/dev/null || echo "ccache 不可用"
-
-  diagnostics:
-    runs-on: ubuntu-22.04
-    if: failure()
-    needs: [setup, build]
-    steps:
-      - name: 📥 下载编译日志
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-logs-*
-          path: diagnostics
-
-      - name: 🔍 分析编译错误
-        run: |
-          echo "=== 编译失败分析 ==="
-          echo "ImmortalWrt 版本: ${{ needs.setup.outputs.immortalwrt_branch }}"
-          echo ""
-          echo "常见问题排查:"
-          echo "1. 依赖缺失: 检查 feeds 是否完整安装"
-          echo "2. 工具链问题: 确认工具链编译是否成功"
-          echo "3. 内存不足: 尝试关闭多线程编译"
-          echo "4. 网络超时: 检查下载的源码包是否完整"
-          echo ""
-          
-          if [ -d "diagnostics" ]; then
-            echo "发现的错误日志:"
-            find diagnostics -name "*.log" -exec grep -l -i "error\|fail" {} \; | head -5
-          fi
-
-      - name: 🛠️ 修复建议
-        run: |
-          echo "=== 修复建议 ==="
-          echo "1. 启用完全清理编译 (clean_build: true)"
-          echo "2. 关闭多线程编译 (multithreading: false)" 
-          echo "3. 检查 .config 文件配置是否正确"
-          echo "4. 确保所有 feeds 成功更新和安装"
-          echo "5. 验证磁盘空间充足 (至少 20GB 可用)"
-          echo ""
-          echo "下次编译建议:"
-          echo "- 使用单线程编译确保稳定性"
-          echo "- 启用完全清理避免缓存问题"
-          echo "- 检查设备配置是否与分支兼容"
-
-      - name: 📤 上传诊断报告
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnostics-report
-          path: diagnostics
-          retention-days: 3
