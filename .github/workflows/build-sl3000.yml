@@ -461,34 +461,28 @@ jobs:
           echo "=========================================="
           echo "🎉 ImmortalWRT 编译成功！"
           echo "=========================================="
-          echo "成功尝试:"
-          {{#each build.outputs}}
-          {{#if success}}
-          echo "- 尝试 {{@key}}: ✅ 成功"
-          {{/if}}
-          {{/each}}
-          
-          # 下载最新成功的产物
-          - name: 📥 下载最新产物 (Download Latest Artifacts)
-            uses: actions/download-artifact@v4
-            with:
-              pattern: immortalwrt-build-attempt-*
-              path: final-artifacts
-          
-          - name: 📦 打包最终版本 (Package Final Release)
-            run: |
-              echo "创建最终发布包..."
-              cd final-artifacts
-              LATEST_ATTEMPT=$(ls -d immortalwrt-build-attempt-* | sort -V | tail -1)
-              cp -r "$LATEST_ATTEMPT" ../immortalwrt-final
-              echo "最终版本: $LATEST_ATTEMPT"
-          
-          - name: 🚀 上传最终版本 (Upload Final Version)
-            uses: actions/upload-artifact@v4
-            with:
-              name: immortalwrt-final-release
-              path: immortalwrt-final
-              retention-days: 90
+          echo "成功尝试: 至少有一次编译尝试成功"
+
+      - name: 📥 下载最新产物 (Download Latest Artifacts)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: immortalwrt-build-attempt-*
+          path: final-artifacts
+
+      - name: 📦 打包最终版本 (Package Final Release)
+        run: |
+          echo "创建最终发布包..."
+          cd final-artifacts
+          LATEST_ATTEMPT=$(ls -d immortalwrt-build-attempt-* | sort -V | tail -1)
+          cp -r "$LATEST_ATTEMPT" ../immortalwrt-final
+          echo "最终版本: $LATEST_ATTEMPT"
+
+      - name: 🚀 上传最终版本 (Upload Final Version)
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-final-release
+          path: immortalwrt-final
+          retention-days: 90
 
   failure:
     runs-on: ubuntu-latest
@@ -509,10 +503,7 @@ jobs:
             echo "可用空间: ${{ needs.pre-build-check.outputs.disk_available }}GB"
           else
             echo "失败原因: 所有编译尝试均失败"
-            echo "各尝试结果:"
-            {{#each build.outputs}}
-            echo "- 尝试 {{@key}}: {{this.result}}"
-            {{/each}}
+            echo "请检查编译日志"
           fi
           
           echo "建议:"
