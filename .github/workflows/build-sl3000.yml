@@ -325,7 +325,6 @@ EOF
           $BUILD_DIR/bin/targets/**/*.gz
         retention-days: 30
         if-no-files-found: error
-        compression-level: 0
 
     - name: Post-build cleanup
       if: always()
