@@ -1,332 +1,362 @@
-name: 🚀 编译 ImmortalWrt 最新稳定版
+name: SL3000 Firmware Build
 
 on:
   workflow_dispatch:
     inputs:
-      target_device:
-        description: "目标设备"
-        required: true
-        default: "mediatek/filogic"
-        type: choice
-        options:
-          - mediatek/filogic
-          - qualcomm/ipq60xx
-          - rockchip/armv8
-          - x86/64
       clean_build:
-        description: "是否完全清理编译"
-        default: false
-        type: boolean
-      multithreading:
-        description: "是否开启多线程编译"
-        default: false
-        type: boolean
-      include_luci:
-        description: "是否包含 Luci Web 界面"
-        default: true
+        description: 'Perform clean build (ignore cache)'
+        required: false
+        default: 'false'
         type: boolean
 
 env:
-  CCACHE_DIR: ${{ github.workspace }}/ccache
-  FORCE_UNSAFE_CONFIGURE: 1
-  TERM: linux
+  BUILD_DIR: openwrt
+  CCACHE_DIR: /tmp/ccache
 
 jobs:
-  setup:
-    runs-on: ubuntu-22.04
-    outputs:
-      immortalwrt_branch: ${{ steps.get_branch.outputs.branch }}
-      branch_version: ${{ steps.get_branch.outputs.version }}
-    steps:
-      - name: 🔍 获取最新稳定版分支
-        id: get_branch
-        run: |
-          LATEST_STABLE="openwrt-24.10"
-          echo "branch=$LATEST_STABLE" >> $GITHUB_OUTPUT
-          VERSION=$(echo $LATEST_STABLE | sed 's/openwrt-//')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "✅ 使用稳定版: $LATEST_STABLE (版本 $VERSION)"
-
   build:
     runs-on: ubuntu-22.04
-    needs: setup
-    timeout-minutes: 240
-    
+    timeout-minutes: 360
+
     steps:
-      - name: 📋 显示编译信息
-        run: |
-          echo "=== ImmortalWrt 编译信息 ==="
-          echo "目标设备: ${{ github.event.inputs.target_device }}"
-          echo "ImmortalWrt 分支: ${{ needs.setup.outputs.immortalwrt_branch }}"
-          echo "固件版本: ${{ needs.setup.outputs.branch_version }}"
-          echo "多线程编译: ${{ github.event.inputs.multithreading }}"
-          echo "包含 Luci: ${{ github.event.inputs.include_luci }}"
+    - name: Checkout repository with config
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
 
-      - name: ⏬ 检查系统资源
-        run: |
-          echo "=== 系统资源信息 ==="
-          echo "CPU 核心数: $(nproc)"
-          echo "内存:"
-          free -h
-          echo "磁盘:"
-          df -h
+    - name: Validate configuration file
+      run: |
+        echo "=== Validating build configuration ==="
+        if [ ! -f "sl3000.config" ]; then
+          echo "❌ ERROR: sl3000.config not found in repository root!"
+          echo "Available files:"
+          ls -la
+          exit 1
+        fi
+        
+        # 验证配置文件基本结构
+        if grep -q "CONFIG_TARGET_mediatek_mt7981_DEVICE_sl_3000-emmc" sl3000.config; then
+          echo "✅ Valid SL3000 EMMC configuration detected"
+        else
+          echo "⚠️  Warning: SL3000 device configuration not found in config"
+        fi
+        
+        # 复制配置文件供后续使用
+        cp sl3000.config .config
+        echo "✅ Configuration file prepared"
 
-      - name: ✅ Checkout 用户配置仓库
-        uses: actions/checkout@v4
-        with:
-          path: user-configs
+    - name: Initialize disk space optimization
+      run: |
+        echo "=== Initializing disk space optimization ==="
+        echo "Initial disk space:"
+        df -h
+        
+        # 安全清理系统缓存
+        sudo apt-get autoremove -y
+        sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
+        
+        # 清理系统日志（保留最近1小时）
+        sudo journalctl --vacuum-time=1h
+        sudo find /var/log -name "*.log" -type f -exec truncate -s 0 {} \; 2>/dev/null || true
+        
+        # 清理临时文件
+        sudo rm -rf /tmp/*
+        sudo rm -rf /var/tmp/*
+        
+        echo "Disk space after initial cleanup:"
+        df -h
 
-      - name: ✅ Checkout ImmortalWrt 源码
-        uses: actions/checkout@v4
-        with:
-          repository: immortalwrt/immortalwrt
-          ref: ${{ needs.setup.outputs.immortalwrt_branch }}
-          path: immortalwrt
+    - name: Install essential build dependencies
+      run: |
+        echo "=== Installing build dependencies ==="
+        # 最小化依赖列表
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          libssl-dev \
+          libncurses5-dev \
+          gawk \
+          gettext \
+          unzip \
+          python3 \
+          python3-pip \
+          subversion \
+          git \
+          wget \
+          curl \
+          file \
+          rsync \
+          ccache \
+          xxd \
+          gcc \
+          g++ \
+          make \
+          bash
+        
+        # 验证关键工具
+        echo "=== Verifying build tools ==="
+        which gcc && gcc --version | head -1
+        which g++ && g++ --version | head -1
+        which make && make --version | head -1
+        which python3 && python3 --version
+        
+        sudo apt-get clean
 
-      - name: 📁 创建目录结构
-        run: |
-          mkdir -p immortalwrt
-          mkdir -p ccache
+    - name: Restore build cache (if available)
+      if: github.event.inputs.clean_build == 'false'
+      uses: actions/cache@v4
+      with:
+        path: |
+          /tmp/ccache
+          /tmp/dl-cache
+        key: ${{ runner.os }}-openwrt-sl3000-${{ hashFiles('sl3000.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-sl3000-
 
-      - name: 🛠️ 安装编译依赖
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential clang flex bison g++ gawk gcc-multilib gettext git \
-            libncurses-dev libssl-dev python3 python3-pip python3-serial \
-            unzip zlib1g-dev file wget rsync curl \
-            ccache ecj cmake ninja-build libxml2-utils
+    - name: Clone ImmortalWrt source code
+      run: |
+        echo "=== Cloning ImmortalWrt source ==="
+        
+        # 检查源仓库可用性
+        if ! git ls-remote https://github.com/padavanonly/immortalwrt-mt798x > /dev/null 2>&1; then
+          echo "❌ ERROR: Cannot access source repository"
+          echo "Trying alternative repository..."
+          git ls-remote https://github.com/immortalwrt/immortalwrt > /dev/null 2>&1
+        fi
+        
+        # 克隆源码（不指定分支，使用默认分支）
+        echo "Cloning main repository..."
+        git clone \
+          --depth=1 \
+          --filter=blob:none \
+          https://github.com/padavanonly/immortalwrt-mt798x \
+          $BUILD_DIR
+        
+        cd $BUILD_DIR
+        echo "✅ Repository cloned successfully"
+        echo "Using branch: $(git branch --show-current)"
+        echo "Repository size:"
+        du -sh .
 
-      - name: 🔧 配置编译环境
-        run: |
-          ccache -M 2G
-          ccache -s
+    - name: Optimize feeds configuration
+      run: |
+        cd $BUILD_DIR
+        echo "=== Optimizing feeds configuration ==="
+        
+        # 备份原始配置
+        cp feeds.conf.default feeds.conf.default.backup
+        
+        # 移除有问题的feeds
+        sed -i '/modemfeed/d' feeds.conf.default
+        sed -i '/kiddin9/d' feeds.conf.default
+        
+        # 优化feeds配置（只保留核心feeds）
+        cat > feeds.conf.default << 'EOF'
+src-git packages https://git.openwrt.org/feed/packages.git;openwrt-21.02
+src-git luci https://git.openwrt.org/project/luci.git;openwrt-21.02
+src-git routing https://git.openwrt.org/feed/routing.git;openwrt-21.02
+src-git telephony https://git.openwrt.org/feed/telephony.git;openwrt-21.02
+# Problematic feeds commented out:
+# src-git modemfeed https://github.com/koshev-msk/modemfeed.git
+# src-git kiddin9 https://github.com/kiddin9/openwrt-packages.git
+EOF
+        
+        echo "✅ Feeds configuration optimized"
+        echo "Final feeds configuration:"
+        cat feeds.conf.default
 
-      - name: 📦 复制用户配置文件
-        run: |
-          echo "复制用户配置文件..."
-          if [ -f "user-configs/.config" ]; then
-            cp -f user-configs/.config immortalwrt/
-            echo "✅ 已复制 .config 文件"
-          else
-            echo "⚠️ 未找到用户 .config，将使用默认配置"
-          fi
-          
-          if [ -f "user-configs/diy.sh" ]; then
-            cp -f user-configs/diy.sh immortalwrt/
-            chmod +x immortalwrt/diy.sh
-            echo "✅ 已复制 diy.sh"
-          fi
-          
-          if [ -d "user-configs/files" ]; then
-            cp -rf user-configs/files immortalwrt/
-            echo "✅ 已复制 files 目录"
-          fi
+    - name: Update and install package feeds
+      run: |
+        cd $BUILD_DIR
+        echo "=== Updating package feeds ==="
+        
+        # 更新feeds
+        ./scripts/feeds update -a
+        echo "✅ Feeds updated successfully"
+        
+        # 安装所有包
+        ./scripts/feeds install -a
+        echo "✅ Packages installed successfully"
+        
+        echo "Feeds directory size:"
+        du -sh feeds/
 
-      - name: 🧹 清理编译环境
-        if: ${{ github.event.inputs.clean_build == 'true' }}
-        working-directory: immortalwrt
-        run: |
-          echo "执行完全清理..."
-          make dirclean || true
-          rm -rf tmp/ staging_dir/ build_dir/ bin/
+    - name: Apply SL3000 configuration
+      run: |
+        cd $BUILD_DIR
+        echo "=== Applying SL3000 configuration ==="
+        
+        # 从根目录复制配置文件
+        if [ -f "../.config" ]; then
+          cp ../.config .config
+          echo "✅ Configuration applied successfully"
+        else
+          echo "❌ ERROR: .config file not found!"
+          exit 1
+        fi
+        
+        # 验证配置
+        echo "=== Verifying target configuration ==="
+        if grep -q "CONFIG_TARGET_mediatek_mt7981_DEVICE_sl_3000-emmc" .config; then
+          echo "✅ SL3000 EMMC target confirmed"
+        else
+          echo "⚠️  Warning: SL3000 target not detected in final config"
+        fi
+        
+        # 运行defconfig来填充缺失的配置
+        echo "=== Running defconfig ==="
+        make defconfig
+        
+        echo "=== Final configuration summary ==="
+        echo "Target: $(grep "CONFIG_TARGET_mediatek_mt7981_DEVICE" .config || echo "Not found")"
+        echo "Architecture: $(grep "CONFIG_TARGET_ARCH_PACKAGES" .config | head -1 || echo "Not found")"
 
-      - name: 🚀 执行自定义脚本
-        working-directory: immortalwrt
-        run: |
-          if [ -f "diy.sh" ]; then
-            echo "执行用户 diy.sh 脚本..."
-            ./diy.sh
-          fi
-
-      - name: 🔄 更新和安装 feeds
-        working-directory: immortalwrt
-        run: |
-          echo "更新 feeds..."
-          ./scripts/feeds update -a
-          echo "安装 feeds..."
-          ./scripts/feeds install -a
-          
-          if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then
-            echo "安装 Luci 相关组件..."
-            ./scripts/feeds install luci
-            ./scripts/feeds install luci-base
-          fi
-
-      - name: ⚙️ 生成基础配置
-        working-directory: immortalwrt
-        run: |
-          echo "生成基础配置..."
-          
-          # 如果已有配置，使用现有配置
-          if [ -f ".config" ]; then
-            echo "使用现有 .config 文件"
-            make defconfig
-            exit 0
-          fi
-          
-          echo "创建默认配置..."
-          
-          # 根据设备类型生成配置
-          DEVICE="${{ github.event.inputs.target_device }}"
-          
-          if [ "$DEVICE" = "mediatek/filogic" ]; then
-            echo "配置为 MediaTek Filogic 设备"
-            echo "CONFIG_TARGET_mediatek=y" > .config
-            echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
-            echo "CONFIG_TARGET_mediatek_filogic_DEVICE_glinet_gl-mt6000=y" >> .config
-          elif [ "$DEVICE" = "qualcomm/ipq60xx" ]; then
-            echo "配置为 Qualcomm IPQ60xx 设备"
-            echo "CONFIG_TARGET_qualcommax=y" > .config
-            echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
-          elif [ "$DEVICE" = "rockchip/armv8" ]; then
-            echo "配置为 Rockchip ARMv8 设备"
-            echo "CONFIG_TARGET_rockchip=y" > .config
-            echo "CONFIG_TARGET_rockchip_armv8=y" >> .config
-          elif [ "$DEVICE" = "x86/64" ]; then
-            echo "配置为 x86/64 设备"
-            echo "CONFIG_TARGET_x86=y" > .config
-            echo "CONFIG_TARGET_x86_64=y" >> .config
-          else
-            echo "❌ 未知设备类型: $DEVICE"
+    - name: Download package sources with resume
+      run: |
+        cd $BUILD_DIR
+        echo "=== Downloading package sources ==="
+        echo "Disk space before download:"
+        df -h
+        
+        # 设置下载缓存
+        mkdir -p /tmp/dl-cache
+        if [ -d "dl" ] && [ ! -L "dl" ]; then
+          echo "Moving existing dl directory to cache..."
+          mv dl/* /tmp/dl-cache/ 2>/dev/null || true
+          rm -rf dl
+        fi
+        ln -sf /tmp/dl-cache dl
+        
+        # 下载包源（带重试机制）
+        for attempt in {1..3}; do
+          echo "Download attempt $attempt..."
+          if make download -j2; then
+            echo "✅ Download completed successfully"
+            break
+          elif [ $attempt -eq 3 ]; then
+            echo "❌ Download failed after 3 attempts"
             exit 1
-          fi
-          
-          # 添加 Luci 配置
-          if [ "${{ github.event.inputs.include_luci }}" = "true" ]; then
-            echo "CONFIG_PACKAGE_luci=y" >> .config
-            echo "CONFIG_PACKAGE_luci-base=y" >> .config
-          fi
-          
-          echo "应用配置..."
-          make defconfig
-
-      - name: 📥 预下载源码包
-        working-directory: immortalwrt
-        timeout-minutes: 30
-        run: |
-          echo "预下载源码包..."
-          make download -j$(nproc) || make download -j1
-          
-          echo "检查下载完整性..."
-          # 删除可能不完整的文件并重新下载
-          find dl -size -1k -name "*.gz" -o -name "*.bz2" -o -name "*.xz" | xargs rm -f 2>/dev/null || true
-          make download -j$(nproc)
-
-      - name: 🏗️ 编译工具链
-        working-directory: immortalwrt
-        timeout-minutes: 120
-        run: |
-          echo "=== 编译工具链 ==="
-          echo "开始时间: $(date)"
-          
-          echo "编译基础工具..."
-          make -j1 tools/compile
-          
-          echo "编译工具链..."
-          make -j1 toolchain/compile
-          
-          # 验证工具链
-          if [ -d "staging_dir/toolchain-" ] && [ -f "staging_dir/toolchain-"*/bin/*-gcc ]; then
-            echo "✅ 工具链编译成功"
-            echo "工具链位置: staging_dir/toolchain-*/bin/"
           else
-            echo "❌ 工具链编译失败"
-            exit 1
+            echo "⚠️  Download attempt $attempt failed, retrying..."
+            sleep 10
           fi
-          
-          echo "完成时间: $(date)"
+        done
+        
+        echo "Download cache size:"
+        du -sh /tmp/dl-cache
+        echo "Disk space after download:"
+        df -h
 
-      - name: 🧱 主编译过程
-        working-directory: immortalwrt
-        timeout-minutes: 180
-        run: |
-          echo "=== 开始主编译 ==="
-          echo "开始时间: $(date)"
-          
-          if [ "${{ github.event.inputs.multithreading }}" = "true" ]; then
-            JOBS=$(($(nproc) - 1))
-            echo "使用多线程编译 (-j$JOBS)..."
-            make -j$JOBS V=s
-          else
-            echo "使用单线程编译 (-j1)..."
-            make -j1 V=s
-          fi
-          
-          echo "完成时间: $(date)"
+    - name: Compile firmware with optimization
+      run: |
+        cd $BUILD_DIR
+        echo "=== Starting firmware compilation ==="
+        echo "Disk space before compilation:"
+        df -h
+        
+        # 设置编译环境
+        export FORCE_UNSAFE_CONFIGURE=1
+        export CCACHE_DIR=/tmp/ccache
+        ccache -o compression=true
+        ccache -o max_size=2G
+        
+        # 显示编译信息
+        echo "CPU cores: $(nproc)"
+        echo "CCACHE stats:"
+        ccache -s
+        
+        # 分阶段编译（避免内存不足）
+        echo "=== Stage 1: Compiling toolchain ==="
+        make toolchain/install -j$(nproc) || make toolchain/install -j2
+        
+        echo "=== Stage 2: Compiling kernel ==="
+        make target/linux/compile -j$(nproc) || make target/linux/compile -j2
+        
+        echo "=== Stage 3: Compiling packages ==="
+        make package/compile -j$(nproc) || make package/compile -j2
+        
+        echo "=== Stage 4: Creating final image ==="
+        make -j$(nproc) || make -j2 || make -j1
+        
+        echo "✅ Compilation completed successfully"
+        echo "CCACHE final stats:"
+        ccache -s
+        echo "Disk space after compilation:"
+        df -h
 
-      - name: 📊 保存编译配置
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-config-${{ needs.setup.outputs.branch_version }}
-          path: |
-            immortalwrt/.config
-            immortalwrt/feeds.conf.default
-          retention-days: 7
+    - name: Save build cache
+      if: github.event.inputs.clean_build == 'false'
+      uses: actions/cache@v4
+      with:
+        path: |
+          /tmp/ccache
+          /tmp/dl-cache
+        key: ${{ runner.os }}-openwrt-sl3000-${{ hashFiles('sl3000.config') }}
 
-      - name: 📝 保存编译日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs-${{ needs.setup.outputs.branch_version }}
-          path: |
-            immortalwrt/logs/
-          retention-days: 3
+    - name: Collect build artifacts
+      run: |
+        cd $BUILD_DIR
+        echo "=== Collecting build artifacts ==="
+        
+        # 查找生成的固件文件
+        echo "Generated firmware files:"
+        find bin/targets -type f \( -name "*.bin" -o -name "*.img" -o -name "*.gz" \) | sort
+        
+        # 显示文件大小
+        echo "Firmware file sizes:"
+        find bin/targets -type f \( -name "*.bin" -o -name "*.img" -o -name "*.gz" \) -exec du -h {} \;
+        
+        # 验证至少有一个固件文件生成
+        if [ $(find bin/targets -type f \( -name "*.bin" -o -name "*.img" -o -name "*.gz" \) | wc -l) -eq 0 ]; then
+          echo "❌ ERROR: No firmware files generated!"
+          exit 1
+        fi
+        
+        echo "✅ Build artifacts collected successfully"
 
-      - name: 📦 上传固件文件
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-${{ needs.setup.outputs.branch_version }}
-          path: |
-            immortalwrt/bin/targets/**/*
-          retention-days: 30
+    - name: Upload firmware artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sl3000-firmware-${{ github.sha }}
+        path: |
+          $BUILD_DIR/bin/targets/**/*.bin
+          $BUILD_DIR/bin/targets/**/*.img
+          $BUILD_DIR/bin/targets/**/*.gz
+        retention-days: 30
+        if-no-files-found: error
+        compression-level: 0
 
-      - name: 💾 保存编译缓存
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-cache
-          path: ccache
-          retention-days: 2
+    - name: Post-build cleanup
+      if: always()
+      run: |
+        echo "=== Performing post-build cleanup ==="
+        
+        # 清理编译中间文件（保留最终镜像）
+        if [ -d "$BUILD_DIR" ]; then
+          cd $BUILD_DIR
+          echo "Cleaning build directories..."
+          rm -rf build_dir/*
+          rm -rf staging_dir/*
+          find . -name "tmp" -type d -exec rm -rf {} + 2>/dev/null || true
+        fi
+        
+        echo "Final disk space:"
+        df -h
 
-      - name: 🎉 编译完成摘要
-        if: always()
-        run: |
-          echo "=== 编译结果摘要 ==="
-          echo "ImmortalWrt 版本: ${{ needs.setup.outputs.immortalwrt_branch }}"
-          echo "目标设备: ${{ github.event.inputs.target_device }}"
-          echo "编译时间: $(date)"
-          
-          if [ -d "immortalwrt/bin/targets" ]; then
-            echo "✅ 编译成功！"
-            echo "生成的固件文件:"
-            find immortalwrt/bin/targets -name "*.bin" -o -name "*.img" -o -name "*.gz" | head -10
-            echo ""
-            echo "固件位置: immortalwrt/bin/targets/"
-          else
-            echo "❌ 编译失败"
-            echo "请查看 build-logs 日志文件分析问题"
-          fi
-
-  diagnostics:
-    runs-on: ubuntu-22.04
-    if: failure()
-    needs: [setup, build]
-    steps:
-      - name: 📋 编译失败分析
-        run: |
-          echo "=== 编译失败分析 ==="
-          echo "ImmortalWrt 版本: ${{ needs.setup.outputs.immortalwrt_branch }}"
-          echo ""
-          echo "常见问题排查:"
-          echo "1. 依赖缺失: 检查 feeds 是否完整安装"
-          echo "2. 工具链问题: 确认工具链编译是否成功" 
-          echo "3. 内存不足: 尝试关闭多线程编译"
-          echo "4. 网络超时: 检查下载的源码包是否完整"
-          echo ""
-          echo "修复建议:"
-          echo "- 启用完全清理编译 (clean_build: true)"
-          echo "- 关闭多线程编译 (multithreading: false)"
-          echo "- 检查 .config 文件配置是否正确"
+    - name: Build summary
+      if: always()
+      run: |
+        echo "=== BUILD SUMMARY ==="
+        echo "Repository: ${{ github.repository }}"
+        echo "Workflow: ${{ github.workflow }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Trigger: ${{ github.event_name }}"
+        
+        if [ -d "$BUILD_DIR/bin/targets" ]; then
+          echo "✅ Build completed successfully"
+          echo "Generated files:"
+          find $BUILD_DIR/bin/targets -type f \( -name "*.bin" -o -name "*.img" -o -name "*.gz" \) | head -10
+        else
+          echo "❌ Build failed or no targets directory"
+        fi
