@@ -1,217 +1,88 @@
-name: 🚀 编译 ImmortalWRT
+name: Build SL-3000 ImmortalWrt Stable
 
 on:
-  workflow_dispatch:
-    inputs:
-      owner:
-        description: "openWRT 仓库的拥有者"
-        type: string
-        required: true
-        default: "immortalwrt"
-      repo:
-        description: "openWRT 仓库的名字"
-        type: string
-        required: true
-        default: "immortalwrt"
-      branch:
-        description: "openWRT 仓库的分支"
-        type: string
-        required: true
-        default: "openwrt-24.10"
-      multithreading:
-        description: "开启多线程编译"
-        type: boolean
-        default: true
-      ssh:
-        description: "使用 ssh 连接到编译环境"
-        type: boolean
-        default: false
-      isFiles:
-        description: "使用files大法"
-        type: boolean
-        default: false
+  workflow_dispatch:   # ✅ 只支持手动触发，不会因保存代码自动运行
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+  CONFIG_FILE: sl3000.config
+  TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    name: 🚀 编译 ImmortalWRT
-    
+    runs-on: ubuntu-22.04
+
     steps:
-      - name: 📊 编译开始信息
-        run: |
-          echo "=========================================="
-          echo "🚀 开始 ImmortalWRT 编译"
-          echo "超时: 360分钟"
-          echo "=========================================="
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: 🗑️ 阶段1: 基础清理
-        run: |
-          echo "开始第一阶段清理..."
-          sudo sync
-          sudo sysctl -w vm.drop_caches=3
-          sudo find /tmp -type f -atime +0 -delete 2>/dev/null || true
-          sudo find /var/tmp -type f -atime +0 -delete 2>/dev/null || true
-          sudo journalctl --vacuum-time=1h
-          sudo find /var/log -type f -name "*.log" -exec truncate -s 0 {} \;
-          echo "第一阶段清理完成"
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/*
+        sudo apt-get -qq update
+        sudo apt-get -qq install -y build-essential git libncurses5-dev gawk gettext unzip file libssl-dev wget python3 ccache
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
 
-      - name: 🗑️ 阶段2: 包管理器清理
-        run: |
-          echo "开始包管理器清理..."
-          sudo apt autoclean
-          sudo apt autoremove -y --purge
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo rm -rf /var/cache/apt/archives/*
-          if command -v pip >/dev/null; then
-            python3 -m pip cache purge 2>/dev/null || true
-          fi
-          if command -v npm >/dev/null; then
-            npm cache clean --force 2>/dev/null || true
-          fi
-          echo "包管理器清理完成"
+    - name: Optimize disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift
+        sudo docker image prune --all --force
+        sudo docker container prune --force
+        sudo apt-get clean
+        sudo apt-get autoremove --purge -y
+        df -hT
 
-      - name: 🗑️ 阶段3: 深度清理
-        run: |
-          echo "开始深度清理..."
-          sudo find /usr/share/doc -depth -type f ! -name copyright -delete 2>/dev/null || true
-          sudo find /usr/share/doc -empty -delete 2>/dev/null || true
-          sudo rm -rf /usr/share/man/* /usr/share/groff/* /usr/share/info/*
-          sudo find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name 'zh*' -exec rm -rf {} + 2>/dev/null || true
-          sudo apt remove -y --purge azure-cli google-cloud-sdk firefox microsoft-edge-stable 2>/dev/null || true
-          echo "深度清理完成"
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-      - name: ⚡ 超级磁盘优化
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 1024
-          swap-size-mb: 0
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-codeql: "true"
-          remove-docker-images: "true"
+    - name: Load custom configuration
+      run: |
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
 
-      - name: 📈 资源状态报告
-        run: |
-          echo "=========================================="
-          echo "📊 优化后资源状态"
-          echo "=========================================="
-          df -hT
-          echo "------------------------------------------"
-          free -h
-          echo "------------------------------------------"
-          echo "CPU信息:"
-          nproc
-          echo "------------------------------------------"
-          AVAILABLE_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo "✅ 可用磁盘空间: ${AVAILABLE_GB}GB"
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
 
-      - name: 📦 安装编译依赖
-        run: |
-          echo "安装编译依赖..."
-          sudo apt update
-          sudo apt install -y build-essential ccache clang cmake gcc-multilib g++-multilib \
-            git libncurses-dev libssl-dev libelf-dev python3 python3-pip rsync subversion \
-            swig unzip wget ack antlr3 asciidoc autoconf automake autopoint binutils bison \
-            bzip2 cpio curl device-tree-compiler ecj fastjar flex gawk gettext gnutls-dev \
-            gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libglib2.0-dev \
-            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libpython3-dev libreadline-dev \
-            libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build \
-            p7zip p7zip-full patch pkgconf python3-ply python3-docutils python3-pyelftools \
-            qemu-utils re2c scons squashfs-tools texinfo uglifyjs upx-ucl vim xmlto xxd \
-            zlib1g-dev zstd
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
 
-      - name: 📥 克隆当前仓库
-        uses: actions/checkout@v4
+    - name: Download package
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec rm -f {} \;
 
-      - name: 📥 克隆 ImmortalWRT
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.owner }}/${{ inputs.repo }}
-          ref: ${{ inputs.branch }}
-          path: openWRT
+    - name: Compile the firmware
+      run: |
+        cd openwrt
+        echo -e "$(nproc) threads compile"
+        make -j$(nproc) || make -j1 V=s
 
-      - name: 📋 复制配置文件
-        run: |
-          cp -f .config diy.sh openWRT/
-          if [ "${{ inputs.isFiles }}" = "true" ]; then
-            cp -rf files openWRT/ 2>/dev/null || true
-          fi
+    - name: Organize files
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
 
-      - name: ⚙️ 运行自定义脚本
-        working-directory: openWRT
-        run: |
-          if [ -f "diy.sh" ]; then
-            chmod +x diy.sh
-            ./diy.sh
-          fi
+    - name: Upload firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: SL3000_firmware
+        path: ${{ env.FIRMWARE }}
 
-      - name: 📥 更新和安装 Feeds
-        working-directory: openWRT
-        run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: 🚨 SSH 调试会话
-        if: ${{ inputs.ssh == true }}
-        uses: mxschmitt/action-tmate@v3
-
-      - name: 🔧 编译前配置优化
-        working-directory: openWRT
-        run: |
-          echo "优化编译配置..."
-          sed -i 's/CONFIG_DEBUG_INFO=y/CONFIG_DEBUG_INFO=n/' .config 2>/dev/null || true
-          echo "CONFIG_CCACHE=y" >> .config
-          make defconfig
-
-      - name: ⏰ 编译超时保护
-        timeout-minutes: 360
-
-      - name: 🛠️ 编译 ImmortalWRT
-        working-directory: openWRT
-        run: |
-          set +e
-          for attempt in 1 2 3; do
-            echo "编译尝试 $attempt/3"
-            if [ "${{ inputs.multithreading }}" = "true" ]; then
-              make -j$(nproc) V=s
-            else
-              make -j1 V=s
-            fi
-            
-            if [ $? -eq 0 ]; then
-              echo "✅ 编译成功!"
-              break
-            else
-              echo "❌ 编译失败，尝试 $attempt/3"
-              if [ $attempt -lt 3 ]; then
-                echo "等待10秒后重试..."
-                sleep 10
-                echo "清理编译环境..."
-                make clean
-              else
-                echo "❌ 所有编译尝试均失败"
-                exit 1
-              fi
-            fi
-          done
-          set -e
-
-      - name: 💾 上传编译结果
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: immortalwrt-build-result
-          path: openWRT/bin/targets/
-          retention-days: 30
-
-      - name: 📋 最终报告
-        if: always()
-        run: |
-          echo "编译完成!"
-          if [ -d "openWRT/bin/targets" ]; then
-            echo "✅ 编译成功!"
-            find openWRT/bin/targets -name "*.bin" -o -name "*.img" | head -5
-          else
-            echo "❌ 编译失败"
-          fi
+    - name: Release firmware
+      uses: softprops/action-gh-release@v2.1.0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        files: ${{ env.FIRMWARE }}/*
+        name: SL3000-ImmortalWrt-${{ github.run_number }}
+        tag_name: SL3000-${{ github.run_number }}
